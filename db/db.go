@@ -13,7 +13,7 @@ var DB *sql.DB
 
 func InitDB() {
 	var err error
-	DB, err = sql.Open("sqlite3", "./gopher.db")
+	DB, err = sql.Open("sqlite3", "./db.db")
 	if err != nil {
 		log.Fatal("Не удалось подключиться к базе данных:", err)
 	}
