@@ -3,11 +3,24 @@ package handlers
 
 import (
 	"chat-bd/models"
+	"chat-bd/services"
 	"chat-bd/utils"
 	"encoding/json"
+	"log"
 	"net/http"
 	"time"
 )
+
+var emailService *services.EmailService
+
+func init() {
+	emailService = services.NewEmailService(
+		"nekstcat@gmail.com",
+		"rvgp rubq xupm qjwq", // app password
+		"smtp.gmail.com",
+		"587",
+	)
+}
 
 // Response представляет стандартный ответ API
 type Response struct {
@@ -47,48 +60,27 @@ func RegisterHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Создаём нового пользователя
-	user := models.User{
-		Name:     creds.Name,
-		Email:    creds.Email,
-		Password: creds.Password,
-	}
-	if err := user.Create(); err != nil {
-		utils.RespondJSON(w, utils.Response{Success: false, Message: "Ошибка регистрации"}, http.StatusInternalServerError)
-		return
-	}
-
-	// Генерация access token
-	accessToken, err := utils.GenerateJWT(user.ID, user.Email)
+	// Генерируем и сохраняем код в БД
+	code, err := utils.GenerateVerificationCode(creds.Email) // ← ваш db из глобального подключения
 	if err != nil {
-		utils.RespondJSON(w, utils.Response{Success: false, Message: "Ошибка генерации access token"}, http.StatusInternalServerError)
+		log.Printf("Ошибка генерации кода: %v", err)
+		utils.RespondJSON(w, utils.Response{Success: false, Message: "Внутренняя ошибка сервера"}, http.StatusInternalServerError)
 		return
 	}
 
-	// Генерация refresh token
-	refreshToken, err := utils.GenerateRefreshToken()
+	// Отправляем код на email
+	err = emailService.SendVerificationCode(creds.Email, creds.Name, code)
 	if err != nil {
-		utils.RespondJSON(w, utils.Response{Success: false, Message: "Ошибка генерации refresh token"}, http.StatusInternalServerError)
+		log.Printf("Ошибка отправки email: %v", err)
+		utils.RespondJSON(w, utils.Response{Success: false, Message: "Не удалось отправить код"}, http.StatusInternalServerError)
 		return
 	}
 
-	// Сохраняем refresh token в БД
-	expiresAt := time.Now().Add(7 * 24 * time.Hour)
-	err = utils.StoreRefreshToken(user.ID, refreshToken, expiresAt)
-	if err != nil {
-		utils.RespondJSON(w, utils.Response{Success: false, Message: "Ошибка сохранения refresh token"}, http.StatusInternalServerError)
-		return
-	}
-
-	// Отправляем оба токена
 	utils.RespondJSON(w, utils.Response{
 		Success: true,
-		Message: "Регистрация успешна",
-		Data: map[string]string{
-			"access_token":  accessToken,
-			"refresh_token": refreshToken,
-		},
-	}, http.StatusCreated)
+		Message: "Код подтверждения отправлен",
+		Data:    map[string]string{"email": creds.Email},
+	}, http.StatusOK)
 }
 
 // LoginHandler обрабатывает аутентификацию пользователя
@@ -151,6 +143,8 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 		Data: map[string]string{
 			"access_token":  accessToken,
 			"refresh_token": refreshToken,
+			"name":          user.Name,
+			"email":         user.Email,
 		},
 	}, http.StatusOK)
 }
@@ -179,5 +173,86 @@ func LogoutHandler(w http.ResponseWriter, r *http.Request) {
 	utils.RespondJSON(w, utils.Response{
 		Success: true,
 		Message: "Выход успешен",
+	}, http.StatusOK)
+}
+
+func VerifyCodeHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		utils.RespondJSON(w, utils.Response{Success: false, Message: "Метод не поддерживается"}, http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+		Name     string `json:"name"`
+		Code     string `json:"code"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		utils.RespondJSON(w, utils.Response{Success: false, Message: "Некорректные данные"}, http.StatusBadRequest)
+		return
+	}
+
+	if req.Email == "" || req.Code == "" {
+		utils.RespondJSON(w, utils.Response{Success: false, Message: "Email и код обязательны"}, http.StatusBadRequest)
+		return
+	}
+
+	// Проверяем код в БД
+	valid, err := utils.ValidateVerificationCode(req.Email, req.Code)
+	if err != nil {
+		log.Printf("Ошибка проверки кода: %v", err)
+		utils.RespondJSON(w, utils.Response{Success: false, Message: "Внутренняя ошибка"}, http.StatusInternalServerError)
+		return
+	}
+	if !valid {
+		utils.RespondJSON(w, utils.Response{Success: false, Message: "Неверный или просроченный код"}, http.StatusUnauthorized)
+		return
+	}
+
+	user := models.User{
+		Name:     req.Name,
+		Email:    req.Email,
+		Password: req.Password,
+	}
+	if err := user.Create(); err != nil {
+		utils.RespondJSON(w, utils.Response{Success: false, Message: "Ошибка создания пользователя"}, http.StatusInternalServerError)
+		return
+	}
+
+	// Удаляем код
+	utils.ClearVerificationCode(req.Email)
+
+	// Генерация access token
+	accessToken, err := utils.GenerateJWT(user.ID, user.Email)
+	if err != nil {
+		utils.RespondJSON(w, utils.Response{Success: false, Message: "Ошибка генерации access token"}, http.StatusInternalServerError)
+		return
+	}
+
+	// Генерация refresh token
+	refreshToken, err := utils.GenerateRefreshToken()
+	if err != nil {
+		utils.RespondJSON(w, utils.Response{Success: false, Message: "Ошибка генерации refresh token"}, http.StatusInternalServerError)
+		return
+	}
+
+	// Сохраняем refresh token в БД
+	expiresAt := time.Now().Add(7 * 24 * time.Hour)
+	err = utils.StoreRefreshToken(user.ID, refreshToken, expiresAt)
+	if err != nil {
+		utils.RespondJSON(w, utils.Response{Success: false, Message: "Ошибка сохранения refresh token"}, http.StatusInternalServerError)
+		return
+	}
+
+	utils.RespondJSON(w, utils.Response{
+		Success: true,
+		Message: "Регистрация завершена",
+		Data: map[string]string{
+			"access_token":  accessToken,
+			"refresh_token": refreshToken,
+			"name":          user.Name,
+			"email":         user.Email,
+		},
 	}, http.StatusOK)
 }

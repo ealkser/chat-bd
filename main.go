@@ -1,73 +1,63 @@
-// Package main — это точка входа в веб-приложение для управления аутентификацией пользователей.
-//
-// Приложение предоставляет API для:
-//   - Регистрации (/register)
-//   - Входа (/login)
-//   - Получения профиля пользователя (/me)
-//   - Выхода (/logout)
-//   - Обновления токена (/refresh)
-//
-// Сервер запускается на порту :8080 и использует SQLite для хранения данных,
-// JWT для аутентификации и stateless сессий.
+// main.go
 package main
 
 import (
 	"chat-bd/db"
 	"chat-bd/handlers"
+	"chat-bd/repositories"
+	"chat-bd/services"
+	"chat-bd/ws"
 	"log"
 	"net/http"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/cors"
 )
 
-// main — основная функция приложения.
-// Инициализирует базу данных, регистрирует HTTP-обработчики и запускает сервер.
-//
-// Процесс запуска:
-//  1. Вызывается db.InitDB() — подключение к БД и создание таблиц (если нужно).
-//  2. Регистрируются маршруты через http.HandleFunc.
-//  3. Сервер начинает прослушивание на http://localhost:8080.
-//
-// При ошибках запуска сервера (например, порт занят), приложение завершается с логом.
 func main() {
-	// Инициализация подключения к базе данных и создание необходимых таблиц
+	// Инициализация БД
 	db.InitDB()
+	defer db.DB.Close()
 
-	// Регистрация маршрутов API
-	http.HandleFunc("/register", handlers.RegisterHandler) // POST: регистрация нового пользователя
-	http.HandleFunc("/login", handlers.LoginHandler)       // POST: аутентификация и выдача токенов
-	http.HandleFunc("/me", handlers.MeHandler)             // GET: получение данных текущего пользователя
-	http.HandleFunc("/logout", handlers.LogoutHandler)     // POST: выход (удаление refresh token)
-	http.HandleFunc("/refresh", handlers.RefreshHandler)   // POST: обновление access token
+	// Создаём репозиторий и сервис чатов
+	chatRepo := repositories.NewChatRepository(db.DB)
+	chatService := services.NewChatService(chatRepo)
 
-	handler := corsMiddleware(http.DefaultServeMux)
+	hub := ws.NewHub(chatService)
+	go hub.Run()
 
-	// Запуск HTTP-сервера
+	handlers.Init(chatService, hub)
+
+	// Создаём chi-роутер
+	r := chi.NewRouter()
+
+	// CORS Middleware (лучше использовать встроенный от chi)
+	r.Use(cors.Handler(cors.Options{
+		AllowedOrigins:   []string{"https://*", "http://*"}, // Для разработки
+		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token"},
+		ExposedHeaders:   []string{"Link"},
+		AllowCredentials: false,
+		MaxAge:           300, // seconds
+	}))
+
+	// Маршруты аутентификации
+	r.Post("/api/auth/register", handlers.RegisterHandler)
+	r.Post("/api/auth/login", handlers.LoginHandler)
+	r.Post("/api/auth/logout", handlers.LogoutHandler)
+	r.Post("/api/auth/refresh", handlers.RefreshHandler)
+	r.Post("/api/auth/verify-code", handlers.VerifyCodeHandler)
+
+	r.Get("/api/me", handlers.MeHandler)
+
+	// Маршруты чатов
+	r.Get("/api/chats", handlers.GetChatsHandler)
+	r.Get("/api/chat/{id}/messages", handlers.GetMessagesHandler)
+	r.Post("/api/chat/{id}/message", handlers.SendMessageHandler)
+	r.Post("/api/start-chat", handlers.StartChatHandler)
+	r.Get("/api/ws", hub.ServeWS)
+
+	// Запуск сервера
 	log.Println("🚀 Сервер запущен на http://localhost:8080")
-	log.Fatal(http.ListenAndServe(":8080", handler))
-}
-
-// corsMiddleware добавляет заголовки CORS, разрешая запросы с фронтенда
-func corsMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Разрешить запросы с любого origin (для разработки)
-		// В продакшене укажите конкретный домен, например: "http://localhost:3000"
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-
-		// Разрешить определённые заголовки
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Refresh-Token")
-
-		// Разрешить определённые методы
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-
-		// Поддержка credentials (если будет использоваться Access-Control-Allow-Origin с конкретным доменом)
-		// w.Header().Set("Access-Control-Allow-Credentials", "true")
-
-		// Обработка preflight-запросов (OPTIONS)
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-
-		// Передача управления следующему обработчику
-		next.ServeHTTP(w, r)
-	})
+	log.Fatal(http.ListenAndServe(":8080", r))
 }

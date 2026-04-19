@@ -27,10 +27,26 @@ func InitDB() {
 	if err != nil {
 		log.Fatal("Не удалось создать таблицу refresh_tokens:", err)
 	}
+
+	err = createVerificationCodesTable()
+	if err != nil {
+		log.Fatal("Не удалось создать таблицу verification_codes:", err)
+	}
+
+	err = createChatTable()
+	if err != nil {
+		log.Fatal("Не удалось создать чатов chats:", err)
+	}
+
+	err = createMessagesTable()
+	if err != nil {
+		log.Fatal("Не удалось создать сообщения chats:", err)
+	}
 }
 
 func createUsersTable() error {
-	sql := `CREATE TABLE IF NOT EXISTS users (
+	sql := `
+	CREATE TABLE IF NOT EXISTS users (
 		id INTEGER PRIMARY KEY,
 		name TEXT NOT NULL,
 		email TEXT NOT NULL UNIQUE,
@@ -41,14 +57,63 @@ func createUsersTable() error {
 	return err
 }
 
+func createVerificationCodesTable() error {
+	sql := `
+	CREATE TABLE IF NOT EXISTS verification_codes (
+		id INTEGER PRIMARY KEY,
+		code CHAR(6) NOT NULL,
+		email TEXT NOT NULL UNIQUE,
+		expires_at TIMESTAMP NOT NULL,
+    	created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	)`
+	_, err := DB.Exec(sql)
+	return err
+}
+
 func createRefreshTokensTable() error {
-	sql := `CREATE TABLE IF NOT EXISTS refresh_tokens (
+	sql := `
+	CREATE TABLE IF NOT EXISTS refresh_tokens (
 		id INTEGER PRIMARY KEY,
 		user_id INTEGER NOT NULL,
 		token TEXT NOT NULL UNIQUE,
 		expires_at DATETIME NOT NULL,
 		FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
 	)`
+	_, err := DB.Exec(sql)
+	return err
+}
+
+func createChatTable() error {
+	sql := `
+	CREATE TABLE IF NOT EXISTS chats (
+		id INTEGER PRIMARY KEY,
+		user1_id INTEGER NOT NULL,
+		user2_id INTEGER NOT NULL,
+		created_at TEXT DEFAULT (datetime('now')),
+		UNIQUE(user1_id, user2_id),
+		FOREIGN KEY (user1_id) REFERENCES users(id),
+		FOREIGN KEY (user2_id) REFERENCES users(id)
+	)`
+	_, err := DB.Exec(sql)
+	return err
+}
+
+func createMessagesTable() error {
+	sql := `
+	CREATE TABLE IF NOT EXISTS messages (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		chat_id INTEGER NOT NULL,
+		sender_id INTEGER NOT NULL,
+		content TEXT NOT NULL,
+		read INTEGER DEFAULT 0,
+		created_at TEXT DEFAULT (datetime('now')),
+		FOREIGN KEY (chat_id) REFERENCES chats(id) ON DELETE CASCADE,
+		FOREIGN KEY (sender_id) REFERENCES users(id)
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_messages_chat_id ON messages(chat_id);
+	CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at);
+	`
 	_, err := DB.Exec(sql)
 	return err
 }
